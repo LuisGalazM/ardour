@@ -1,0 +1,154 @@
+# Build a real 64-bit Windows executable from this repository.
+# An installer/portable release is NOT implied by a successful compilation.
+name: Ardour Windows x64
+on:
+  push:
+    branches:
+      - build/ardour-windows-x64
+      - master
+    paths:
+      - '.github/workflows/windows-x64.yml'
+      - 'wscript'
+      - 'waf'
+      - 'libs/**'
+      - 'gtk2_ardour/**'
+      - 'share/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout full Git history for Ardour versioning
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install MSYS2 UCRT64 build environment
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            python
+            make
+            unzip
+            zip
+            file
+            pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-glibmm
+            mingw-w64-ucrt-x86_64-libsndfile
+            mingw-w64-ucrt-x86_64-curl
+            mingw-w64-ucrt-x86_64-libarchive
+            mingw-w64-ucrt-x86_64-fftw
+            mingw-w64-ucrt-x86_64-liblo
+            mingw-w64-ucrt-x86_64-taglib
+            mingw-w64-ucrt-x86_64-vamp-plugin-sdk
+            mingw-w64-ucrt-x86_64-rubberband
+            mingw-w64-ucrt-x86_64-aubio
+            mingw-w64-ucrt-x86_64-portaudio
+            mingw-w64-ucrt-x86_64-cairomm
+            mingw-w64-ucrt-x86_64-pangomm
+            mingw-w64-ucrt-x86_64-jack2
+            mingw-w64-ucrt-x86_64-serd
+            mingw-w64-ucrt-x86_64-sord
+            mingw-w64-ucrt-x86_64-sratom
+            mingw-w64-ucrt-x86_64-lilv
+            mingw-w64-ucrt-x86_64-libwebsockets
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-libusb
+            mingw-w64-ucrt-x86_64-libjpeg-turbo
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-gtk2
+
+      - name: Restore version tags from upstream Ardour
+        run: |
+          set -euo pipefail
+          git remote add ardour-upstream https://github.com/Ardour/ardour.git
+          git fetch --force --tags ardour-upstream
+          git describe --tags --long
+
+      - name: Configure Windows audio build (PortAudio + dummy)
+        run: |
+          set -euo pipefail
+          git describe --tags --always --dirty
+          python ./waf configure \
+            --check-c-compiler=gcc \
+            --check-cxx-compiler=g++ \
+            --dist-target=mingw \
+            --configdir=share \
+            --no-execstack \
+            --no-dr-mingw \
+            --cxx17 \
+            --ptformat \
+            --use-lld \
+            --with-backends=portaudio,dummy \
+            --optimize \
+            --prefix=/ucrt64
+
+      - name: Compile Ardour for Windows x64
+        run: |
+          set -euo pipefail
+          python ./waf build -j2
+          find build/gtk2_ardour -maxdepth 1 -type f -iname 'ardour*.exe' -print
+          find build/gtk2_ardour -maxdepth 1 -type f -iname 'ardour*.exe' | grep -q .
+
+      - name: Stage binaries, Ardour resources and runtime dependencies
+        run: |
+          set -euo pipefail
+          dest="$PWD/ci-stage"
+          python ./waf install --destdir="$dest"
+          mkdir -p "$dest/ucrt64/bin"
+          # MSYS2 runtime and C/C++ libraries are required by the compiled executable.
+          cp -n /ucrt64/bin/*.dll "$dest/ucrt64/bin/"
+          for p in lib/gtk-2.0 lib/gdk-pixbuf-2.0 lib/pango share/glib-2.0/schemas share/icons share/themes etc/gtk-2.0 etc/fonts; do
+            if [ -d "/ucrt64/$p" ]; then
+              mkdir -p "$dest/ucrt64/$(dirname "$p")"
+              cp -R "/ucrt64/$p" "$dest/ucrt64/$p"
+            fi
+          done
+          cat > "$dest/README.txt" <<'EOF'
+          Ardour Windows x64 build from LuisGalazM/ardour.
+
+          This archive is a development build produced with the UCRT64 MinGW
+          toolchain. It is NOT a tested, relocatable Windows installer.
+          Runtime files are staged under ucrt64/. Ardour is compiled with
+          prefix /ucrt64; an ordinary arbitrary-folder unzip may not launch
+          correctly until the runtime paths are made relocatable.
+
+          For a development smoke test, run in an MSYS2 UCRT64 environment
+          with the compiled package installed at /ucrt64.
+          EOF
+          find "$dest" -iname 'ardour*.exe' -type f -print | tee build-executables.txt
+          grep -q . build-executables.txt
+
+      - name: Upload Windows x64 binary and runtime files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-windows-x64-ucrt64
+          path: ci-stage/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ardour-windows-x64-diagnostics
+          path: |
+            build/config.log
+            build/c4che/
+            build-executables.txt
+          if-no-files-found: ignore
+          retention-days: 14
