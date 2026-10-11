@@ -72,6 +72,13 @@ jobs:
             mingw-w64-ucrt-x86_64-lld
             mingw-w64-ucrt-x86_64-gtk2
 
+      - name: Restore version tags from upstream Ardour
+        run: |
+          set -euo pipefail
+          git remote add ardour-upstream https://github.com/Ardour/ardour.git
+          git fetch --force --tags ardour-upstream
+          git describe --tags --long
+
       - name: Configure Windows audio build (PortAudio + dummy)
         run: |
           set -euo pipefail
